@@ -1,66 +1,89 @@
-import json
-import requests
-import websocket
-import threading
+#!/usr/bin/env python3
 
-ARI_USER = 'aiuser'
-ARI_PASS = 'ai123'
-ARI_URL = 'http://localhost:8088'
-WS_URL = 'ws://localhost:8088/ari/events?api_key=aiuser:ai123&app=ai-assistant&subscribeAll=true'
+import asyncio, json, os, subprocess
+import websockets, requests
+from requests.auth import HTTPBasicAuth
 
+# ───── Configuration ─────
+ARI_USER = "aiuser"
+ARI_PASS = "SuperSecretPass"
+ARI_IP = "127.0.0.1"
+ARI_APP = "ai-assistant"
+ARI_WS_URL = f"ws://{ARI_IP}:8088/ari/events?api_key={ARI_USER}:{ARI_PASS}&app={ARI_APP}"
+ARI_REST_URL = f"http://{ARI_IP}:8088/ari"
+SOUNDS_DIR = "/var/lib/asterisk/sounds/custom"
+AUTH = HTTPBasicAuth(ARI_USER, ARI_PASS)
 
-def on_message(ws, message):
-    data = json.loads(message)
-    event_type = data.get("type")
+# Create sounds directory if missing
+os.makedirs(SOUNDS_DIR, exist_ok=True)
 
-    if event_type == "StasisStart":
-        channel = data["channel"]
-        channel_id = channel["id"]
+# ───── Text to Speech using Piper ─────
+def text_to_speech(text, wav_path_raw, wav_path_final):
+    """Generate TTS audio using Piper and convert to Asterisk-compatible format"""
+    from services.tts import synthesize_text
 
-        print(f"📞 Incoming call: {channel['caller']['number']}")
+    print(f"🧠 Synthesizing: '{text}'")
+    synthesize_text(text, wav_path_raw)
 
-        # Answer the call
-        requests.post(f"{ARI_URL}/ari/channels/{channel_id}/answer", auth=(ARI_USER, ARI_PASS))
+    # Convert to 8000Hz mono WAV (required by Asterisk)
+    subprocess.run([
+        "sox", wav_path_raw, "-r", "8000", "-c", "1", "-b", "16", wav_path_final
+    ], check=True)
 
-        # Start recording
-        requests.post(f"{ARI_URL}/ari/channels/{channel_id}/record",
-                      auth=(ARI_USER, ARI_PASS),
-                      data={
-                          'name': 'call_recording',
-                          'format': 'wav',
-                          'beep': 'true',
-                          'ifExists': 'overwrite'
-                      })
+# ───── Handle incoming call ─────
+async def handle_call(chan_id: str, pb_id: str, future: asyncio.Future):
+    print(f"\n📞 Handling call {chan_id}")
 
-        print("🎙️ Recording started...")
+    # Answer the call
+    requests.post(f"{ARI_REST_URL}/channels/{chan_id}/answer", auth=AUTH)
 
-    elif event_type == "RecordingFinished":
-        print("✅ Recording finished.")
+    # Generate AI response
+    ai_response = "مرحبا! كيف يمكنني مساعدتك اليوم؟"
+    raw_path = f"/tmp/tts-{chan_id}-raw.wav"
+    final_path = f"{SOUNDS_DIR}/tts-{chan_id}.wav"
+    text_to_speech(ai_response, raw_path, final_path)
 
-def on_error(ws, error):
-    print("❌ Error:", error)
+    # Play the audio
+    requests.post(f"{ARI_REST_URL}/channels/{chan_id}/play", auth=AUTH, json={
+        "media": f"sound:custom/tts-{chan_id}",
+        "playbackId": pb_id
+    })
+    print(f"▶️ Playing: {ai_response} (playbackId: {pb_id})")
 
-def on_close(ws, close_status_code, close_msg):
-    print("🔌 Connection closed")
+    # Wait for playback to finish
+    await future
 
-def on_open(ws):
-    print("🤖 ARI WebSocket connected and listening...")
+    # Hang up
+    requests.delete(f"{ARI_REST_URL}/channels/{chan_id}", auth=AUTH)
+    print(f"📴 Call {chan_id} hung up")
 
+# ───── Main WebSocket loop ─────
+async def main():
+    futures = {}  # pb_id -> asyncio.Future
+    print(f"Connecting to {ARI_WS_URL} ...")
+
+    async with websockets.connect(ARI_WS_URL) as ws:
+        print("✅ Connected to ARI WebSocket. Waiting for calls...")
+
+        async for message in ws:
+            event = json.loads(message)
+
+            if event.get("type") == "StasisStart":
+                chan_id = event["channel"]["id"]
+                pb_id = f"pb-{chan_id}"
+                fut = asyncio.get_event_loop().create_future()
+                futures[pb_id] = fut
+                asyncio.create_task(handle_call(chan_id, pb_id, fut))
+
+            elif event.get("type") == "PlaybackFinished":
+                pb_id = event["playback"]["id"]
+                if pb_id in futures:
+                    futures[pb_id].set_result(True)
+                    del futures[pb_id]
+
+# ───── Entry point ─────
 if __name__ == "__main__":
-    ws = websocket.WebSocketApp(WS_URL,
-                                on_message=on_message,
-                                on_error=on_error,
-                                on_close=on_close)
-    ws.on_open = on_open
-
-    # Run the WebSocket in a separate thread
-    wst = threading.Thread(target=ws.run_forever)
-    wst.daemon = True
-    wst.start()
-
-    # Keep the script alive
     try:
-        while True:
-            pass
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("🛑 Exiting...")
+        print("\n🔌 Exiting ...")
