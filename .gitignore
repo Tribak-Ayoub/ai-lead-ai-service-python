@@ -2,3 +2,4 @@ venv/
 piper_tts/piper/
 piper_tts/models/
 out_*.wav
+audio_samples/*.wav
