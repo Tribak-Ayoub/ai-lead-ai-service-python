@@ -4,16 +4,16 @@ python-dotenv==1.0.0
 google-generativeai==0.3.0
 
 # Faster Whisper for STT
-faster-whisper==0.6.4
+faster-whisper==1.1.1
 
 # Piper TTS
-piper-tts==0.0.2
+piper-tts==1.3.0
 
 # For handling multipart/form-data uploads
 python-multipart==0.0.6
 
 # Pydantic for data validation
-pydantic==2.3.0
+pydantic==1.10.11
 
 # Optional: HTTP client for API calls (if needed)
 httpx==0.24.1
