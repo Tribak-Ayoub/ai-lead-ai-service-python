@@ -2,18 +2,18 @@
 
 This is the Python FastAPI microservice for AI-powered phone lead qualification, providing:
 
-- Speech-to-Text (STT) using Faster-Whisper  
-- Intent Detection using Google Gemini API  
-- Text-to-Speech (TTS) using Piper  
+- Speech-to-Text (STT) using Faster-Whisper
+- Intent Detection using Google Gemini API
+- Text-to-Speech (TTS) using Piper
 
 ---
 
 ## 🚀 Features
 
-- Transcribe caller audio to text  
-- Detect caller intent via AI  
-- Generate spoken AI responses  
-- Ready for integration with Asterisk telephony server  
+- Transcribe caller audio to text
+- Detect caller intent via AI
+- Generate spoken AI responses
+- Ready for integration with Asterisk telephony server
 
 ---
 
@@ -35,37 +35,38 @@ This is the Python FastAPI microservice for AI-powered phone lead qualification,
 ├── run.sh                    # Script to start server
 └── README.md                  # This file
 
-````
+```
 
 ---
 
 ## ⚙️ Setup
 
 1. Clone the repository:
-   ```bash
+
+```bash
    git clone https://github.com/Tribak-Ayoub/ai-lead-ai-service-python.git
    cd ai-lead-ai-service-python
-````
+```
 
 2. Create and activate a Python virtual environment:
 
-   ```bash
+```bash
    python3 -m venv venv
    source venv/bin/activate
-   ```
+```
 
 3. Install dependencies:
 
-   ```bash
+```bash
    pip install -r requirements.txt
-   ```
+```
 
 4. Copy `.env.example` to `.env` and fill in your API keys and settings:
 
-   ```bash
+```bash
    cp .env.example .env
    # Then edit .env with your GEMINI_API_KEY etc.
-   ```
+```
 
 ---
 
@@ -89,18 +90,18 @@ http://localhost:8000
 
 ### 1. Speech-to-Text (STT)
 
-* **POST** `/stt/transcribe`
-* Upload an audio file, receive the transcribed text.
+- **POST** `/stt/transcribe`
+- Upload an audio file, receive the transcribed text.
 
 ### 2. Intent Detection
 
-* **POST** `/intent`
-* Send transcribed text, receive the detected intent JSON.
+- **POST** `/intent`
+- Send transcribed text, receive the detected intent JSON.
 
 ### 3. Text-to-Speech (TTS)
 
-* **POST** `/tts/speak`
-* Send text, receive audio (WAV/MP3) response.
+- **POST** `/tts/speak`
+- Send text, receive audio (WAV/MP3) response.
 
 ---
 
@@ -112,12 +113,11 @@ Feel free to open issues or pull requests!
 
 ## ⚠️ Security
 
-* Do **not** commit your `.env` file with API keys.
-* Use `.env.example` as a template for others.
+- Do **not** commit your `.env` file with API keys.
+- Use `.env.example` as a template for others.
 
 ---
 
 ## 📄 License
 
 This project is licensed under the MIT License.
-
