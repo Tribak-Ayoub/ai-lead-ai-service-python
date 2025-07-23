@@ -14,7 +14,7 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio_upload(file: UploadFile = File(...)):
     if not file.content_type or not file.content_type.startswith("audio/"):
         raise HTTPException(status_code=400, detail="Unsupported audio type")
 
@@ -37,3 +37,11 @@ async def transcribe_audio(file: UploadFile = File(...)):
             os.remove(temp_filepath)
 
     return {"transcription": transcription}
+
+# New helper for file-based transcription
+async def transcribe_audio(file_path: str) -> str:
+    # Directly transcribe an existing audio file
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Audio file not found: {file_path}")
+    segments, _ = model.transcribe(file_path)
+    return " ".join([segment.text for segment in segments])
