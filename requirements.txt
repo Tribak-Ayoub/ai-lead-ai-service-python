@@ -20,3 +20,5 @@ httpx==0.24.1
 
 # For testing
 pytest==7.4.2
+
+ari-py

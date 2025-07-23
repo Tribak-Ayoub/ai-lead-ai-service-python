@@ -3,5 +3,11 @@
 # Load environment variables from .env (optional)
 export $(grep -v '^#' .env | xargs)
 
-# Run the FastAPI server with hot reload on port 8000
-uvicorn app.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --reload
+
+#!/bin/bash
+
+echo "[*] Starting FastAPI server..."
+uvicorn app.main:app --host 0.0.0.0 --port 8001 &
+
+echo "[*] Starting ARI service..."
+python3 -m app.services.ari_service

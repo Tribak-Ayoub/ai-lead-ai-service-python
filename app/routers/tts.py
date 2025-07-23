@@ -6,6 +6,7 @@ router = APIRouter()
 
 @router.get("/tts/speak")
 def speak(text: str = Query(..., min_length=1, description="Text to synthesize")):
+    """Generate TTS audio from input text using Piper."""
     try:
         audio_path = synthesize_with_piper(text)
         return FileResponse(
@@ -13,9 +14,7 @@ def speak(text: str = Query(..., min_length=1, description="Text to synthesize")
             media_type="audio/wav",
             filename="speech.wav",
         )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except RuntimeError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unknown error: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
