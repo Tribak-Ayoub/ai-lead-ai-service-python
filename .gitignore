@@ -60,3 +60,5 @@ test_data/*.mp3
 # OS files
 .DS_Store
 Thumbs.db
+
+piper_tts/
