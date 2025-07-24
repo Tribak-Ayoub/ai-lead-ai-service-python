@@ -6,6 +6,9 @@ import time
 import os
 import asyncio
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from app.services.whisper_service import transcribe_audio
 from app.services.intent_service import detect_intent
 from app.services.piper_service import synthesize_with_piper as generate_tts
@@ -24,11 +27,15 @@ def convert_wav_for_asterisk(src_path, dst_path):
     ])
 
 # Configuration
-ARI_URL = "http://localhost:8088/ari"
-ARI_WS_URL = "ws://localhost:8088/ari/events?api_key=aiuser:SuperSecretPass&app=ai-assistant"
-APP_NAME = "ai-assistant"
-AUTH = ("aiuser", "SuperSecretPass")
+ARI_URL = os.getenv("ARI_BASE_URL")
+ARI_USERNAME = os.getenv("ARI_USERNAME")
+ARI_PASSWORD = os.getenv("ARI_PASSWORD")
+AUTH = (ARI_USERNAME, ARI_PASSWORD)
 
+APP_NAME = "ai-assistant"
+ARI_WS_URL = f"ws://localhost:8088/ari/events?api_key={ARI_USERNAME}:{ARI_PASSWORD}&app={APP_NAME}"
+
+print("data: ", ARI_USERNAME)
 def api_get(path):
     url = f"{ARI_URL}{path}"
     r = requests.get(url, auth=AUTH)
