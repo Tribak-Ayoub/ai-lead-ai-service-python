@@ -8,11 +8,24 @@ API_KEY = os.getenv("GOOGLE_API_KEY")
 if not API_KEY:
     raise RuntimeError("GOOGLE_API_KEY not set in environment or .env file")
 
-# Initialize Google GenAI client with API key (singleton for reuse)
+# Initialize Google GenAI client
 client = genai.Client(api_key=API_KEY)
+MODEL_NAME = "gemini-2.0-flash-001"
 
-MODEL_NAME = "gemini-2.0-flash-001"  # current production-ready model
+# -----------------------------
+# ✅ Quick intent check (manual)
+# -----------------------------
+def quick_intent_check(text: str) -> str:
+    lower_text = text.lower()
+    if re.search(r"\b(hi|hello|salam|hey)\b", lower_text):
+        return "greeting"
+    if len(lower_text.strip()) < 3 or re.search(r"\b(hmm|uh|...)\b", lower_text):
+        return "unclear"
+    return None  # Use Gemini if nothing matches
 
+# ---------------------------------------
+# 🔍 Main Gemini intent detection (async)
+# ---------------------------------------
 async def detect_intent(text: str) -> dict:
     prompt = (
         "You are a lead qualification assistant. "
@@ -23,7 +36,6 @@ async def detect_intent(text: str) -> dict:
     )
 
     try:
-        # The API call is synchronous, so we run it in a threadpool to avoid blocking
         from asyncio import to_thread
         response = await to_thread(
             lambda: client.models.generate_content(
@@ -34,7 +46,6 @@ async def detect_intent(text: str) -> dict:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {e}")
 
-    # Clean and normalize Gemini's response
     content = response.text.strip()
     content = re.sub(r"^```json\s*|\s*```$", "", content.strip())
 

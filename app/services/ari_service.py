@@ -1,41 +1,43 @@
-import requests
-import threading
-import websocket
-import json
-import time
 import os
+import json
+import re
+import time
+import threading
+import subprocess
 import asyncio
+import requests
+import websocket
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from app.services.whisper_service import transcribe_audio
-from app.services.intent_service import detect_intent
 from app.services.piper_service import synthesize_with_piper as generate_tts
 
-import subprocess
-
-def convert_wav_for_asterisk(src_path, dst_path):
-    subprocess.run([
-        'ffmpeg',
-        '-y',                   # overwrite existing file
-        '-i', src_path,         # input TTS file
-        '-ar', '8000',          # 8000 Hz (required by Asterisk for ulaw)
-        '-ac', '1',             # mono
-        '-sample_fmt', 's16',   # 16-bit signed PCM
-        dst_path
-    ])
-
-# Configuration
+# ---------------------- CONFIG ----------------------
 ARI_URL = os.getenv("ARI_BASE_URL")
 ARI_USERNAME = os.getenv("ARI_USERNAME")
 ARI_PASSWORD = os.getenv("ARI_PASSWORD")
-AUTH = (ARI_USERNAME, ARI_PASSWORD)
-
 APP_NAME = "ai-assistant"
+AUTH = (ARI_USERNAME, ARI_PASSWORD)
 ARI_WS_URL = f"ws://localhost:8088/ari/events?api_key={ARI_USERNAME}:{ARI_PASSWORD}&app={APP_NAME}"
 
-print("data: ", ARI_USERNAME)
+SOUND_FILE_NAME = "ai_response"
+SOUND_FILE_PATH = f"/var/lib/asterisk/sounds/ai/{SOUND_FILE_NAME}.wav"
+RECORD_DIR = "/var/spool/asterisk/recording"
+
+RESPONSE_TEMPLATES = {
+    "greeting": "Hello! Thank you for calling. How can I assist you today?",
+    "interested": "That's great to hear! I'm glad you're interested. An agent will follow up with you shortly.",
+    "not interested": "No worries at all. Thank you for your time, and feel free to contact us anytime.",
+    "needs follow-up": "Sure thing. We’ll get back to you with more details as soon as possible.",
+    "invalid number": "Hmm, I’m having trouble identifying the number. Could you try calling again later?",
+    "unclear": "Sorry, I didn’t quite catch that. Could you please repeat it more clearly?",
+    "other": "Thanks for your message. Can you tell me a bit more about what you're looking for?",
+    "goodbye": "Thanks again for calling. Have a great day!"
+}
+
+# ---------------------- API WRAPPERS ----------------------
 def api_get(path):
     url = f"{ARI_URL}{path}"
     r = requests.get(url, auth=AUTH)
@@ -53,98 +55,146 @@ def api_delete(path):
     r = requests.delete(url, auth=AUTH)
     return r.status_code == 204
 
+# ---------------------- AUDIO TOOLS ----------------------
+def convert_wav_for_asterisk(src_path, dst_path):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", src_path,
+        "-ar", "8000", "-ac", "1", "-sample_fmt", "s16",
+        dst_path
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# ---------------------- INTENT SERVICE ----------------------
+import google.genai as genai
+
+API_KEY = os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    raise RuntimeError("GOOGLE_API_KEY not set")
+
+genai_client = genai.Client(api_key=API_KEY)
+MODEL_NAME = "gemini-2.0-flash-001"
+
+def quick_intent_check(text: str) -> str:
+    lower = text.lower()
+    if re.search(r"\b(hi|hello|salam|hey)\b", lower):
+        return "greeting"
+    if len(lower.strip()) < 3 or re.search(r"\b(hmm|uh|\.\.\.)\b", lower):
+        return "unclear"
+    return None
+
+async def detect_intent(text: str) -> dict:
+    prompt = (
+        "You are a lead qualification assistant. Classify the transcription into one of: "
+        "interested, not interested, needs follow-up, invalid number, or other. Respond with JSON: "
+        "{\"intent\": <intent>, \"confidence\": <0-1>}\n\n"
+        f"Transcription: \"{text}\""
+    )
+    from asyncio import to_thread
+    response = await to_thread(lambda: genai_client.models.generate_content(
+        model=MODEL_NAME, contents=[{"text": prompt}]
+    ))
+    content = re.sub(r"^```json|```$", "", response.text.strip())
+    return json.loads(content)
+
+# ---------------------- MAIN EVENT HANDLER ----------------------
 def handle_event(event):
     if event.get("type") == "StasisStart":
-        channel = event["channel"]
-        channel_id = channel["id"]
-        caller_num = channel.get("caller", {}).get("number", "unknown")
-        print(f"[+] Incoming call from {caller_num}")
-
-        # Answer call
+        channel_id = event["channel"]["id"]
+        print(f"[+] Incoming call from {event['channel'].get('caller', {}).get('number', 'unknown')}")
         api_post(f"/channels/{channel_id}/answer")
         print("[*] Call answered")
+        threading.Thread(target=conversation_loop, args=(channel_id,)).start()
 
-        # Start recording
-        record_filename = f"recording-{channel_id}"
-        record_path = f"/var/spool/asterisk/recording/{record_filename}.wav"
-        api_post(f"/channels/{channel_id}/record", {
-           "name": record_filename,
-           "format": "wav",
-           "maxDurationSeconds": 5,
-           "ifExists": "overwrite"
-        })
-        print("[*] Recording started")
+# ---------------------- CONVERSATION LOOP ----------------------
+def conversation_loop(channel_id):
+    unclear_attempts = 0
+    try:
+        while True:
+            record_filename = f"recording-{channel_id}"
+            record_path = os.path.join(RECORD_DIR, f"{record_filename}.wav")
 
-        # Wait for recording and respond
-        threading.Thread(target=wait_for_recording, args=(channel_id, record_path)).start()
+            api_post(f"/channels/{channel_id}/record", {
+                "name": record_filename,
+                "format": "wav",
+                "maxDurationSeconds": 5,
+                "ifExists": "overwrite"
+            })
+            print("[*] Recording started...")
+            time.sleep(6)
 
-def wait_for_recording(channel_id, record_path):
-    print("[*] Waiting for recording to finish...")
+            if not os.path.isfile(record_path):
+                print("[!] No audio recorded.")
+                break
+
+            text = asyncio.run(transcribe_audio(record_path))
+            print("[STT]", text)
+
+            if not text.strip():
+                unclear_attempts += 1
+                if unclear_attempts >= 2:
+                    play_and_hangup(channel_id, RESPONSE_TEMPLATES["goodbye"])
+                    return
+                play_response(channel_id, RESPONSE_TEMPLATES["unclear"])
+                continue
+
+            quick = quick_intent_check(text)
+            if quick:
+                intent = {"intent": quick, "confidence": 1.0}
+            else:
+                intent = asyncio.run(detect_intent(text))
+
+            print("[INTENT]", intent)
+            intent_name = intent.get("intent", "other")
+            response = RESPONSE_TEMPLATES.get(intent_name, RESPONSE_TEMPLATES["other"])
+
+            print("[TEMPLATE REPLY]", response)
+            play_response(channel_id, response)
+
+            if intent_name in ["not interested", "invalid number"]:
+                print("[*] Ending call due to intent:", intent_name)
+                break
+
+    except Exception as e:
+        print("[!] Error in conversation loop:", e)
+    finally:
+        hangup_channel(channel_id)
+
+# ---------------------- PLAYBACK ----------------------
+def play_response(channel_id, text):
+    tts_raw_path = generate_tts(text)
+    convert_wav_for_asterisk(tts_raw_path, SOUND_FILE_PATH)
+    api_post(f"/channels/{channel_id}/play", {
+        "media": f"sound:ai/{SOUND_FILE_NAME}"
+    })
+    print("[*] Playing response...")
     time.sleep(6)
 
-    if not os.path.isfile(record_path):
-        print("[!] Recording not found:", record_path)
-        return
-
-    print("[*] Recording finished:", record_path)
-
-    # Transcribe and detect intent
-    text = asyncio.run(transcribe_audio(record_path))
-    print("[STT]", text)
-    intent = asyncio.run(detect_intent(text))
-    print("[INTENT]", intent)
-
-    # Generate TTS and convert format
-    response_text = f"{intent['intent']} with confidence {intent['confidence']:.2f}"
-    tts_path_raw = generate_tts(response_text)
-    print("[TTS] Generated raw:", tts_path_raw)
-
-    tts_path = "/tmp/converted.wav"
-    os.system(f"ffmpeg -y -i {tts_path_raw} -ar 16000 -ac 1 -c:a pcm_s16le {tts_path}")
-    print("[TTS] Converted to:", tts_path)
-
-    # Copy to Asterisk sounds folder
-    sound_file_name = "ai_response"
-    sound_file_path = f"/var/lib/asterisk/sounds/ai/{sound_file_name}.wav"
-    convert_wav_for_asterisk(tts_path_raw, sound_file_path)
-    print("[TTS] Converted and copied to:", sound_file_path)
-
-
-    # Play TTS on channel
-    api_post(f"/channels/{channel_id}/play", {
-        "media": f"sound:ai/{sound_file_name}"
-    })
-    print("[*] Playing TTS to caller")
-
-    # Wait long enough for playback to finish before hangup
-    time.sleep(7)
-
-    # Hangup channel safely
+def play_and_hangup(channel_id, text):
+    play_response(channel_id, text)
     hangup_channel(channel_id)
 
+# ---------------------- CLEAN HANGUP ----------------------
 def hangup_channel(channel_id):
     try:
-        res = api_get(f"/channels/{channel_id}")
-        if res:
+        if api_get(f"/channels/{channel_id}"):
             print(f"[*] Hanging up channel {channel_id}")
             api_delete(f"/channels/{channel_id}")
     except requests.exceptions.HTTPError:
-        print(f"[!] Channel {channel_id} already closed, cannot hang up.")
+        print(f"[!] Channel {channel_id} already closed.")
 
-# WebSocket Callbacks
+# ---------------------- WEBSOCKET EVENTS ----------------------
 def on_message(ws, message):
-    event = json.loads(message)
-    handle_event(event)
+    handle_event(json.loads(message))
 
 def on_error(ws, error):
     print("[ERROR]", error)
 
-def on_close(ws, close_status_code, close_msg):
+def on_close(ws, *args):
     print("[*] WebSocket closed")
 
 def on_open(ws):
     print("[*] WebSocket connected, waiting for calls...")
 
+# ---------------------- ENTRY POINT ----------------------
 def main():
     ws = websocket.WebSocketApp(
         ARI_WS_URL,
