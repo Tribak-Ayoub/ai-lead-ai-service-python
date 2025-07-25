@@ -7,7 +7,7 @@ import uuid
 router = APIRouter()
 
 # Load Faster-Whisper model (base/medium/small depending on system RAM)
-model = WhisperModel("base")
+model = WhisperModel("medium")
 
 # Directory to store temporary audio files
 UPLOAD_DIR = "uploads"
@@ -23,25 +23,27 @@ async def transcribe_audio_upload(file: UploadFile = File(...)):
     temp_filepath = os.path.join(UPLOAD_DIR, temp_filename)
 
     try:
-        with open(temp_filepath, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Transcribe the uploaded audio
-        segments, _ = model.transcribe(temp_filepath)
+        segments, info = model.transcribe(temp_filepath)
         transcription = " ".join([segment.text for segment in segments])
-
+        detected_lang = info.language
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
     finally:
         if os.path.exists(temp_filepath):
             os.remove(temp_filepath)
 
-    return {"transcription": transcription}
+    return {"transcription": transcription, "language": detected_lang}
 
 # New helper for file-based transcription
-async def transcribe_audio(file_path: str) -> str:
-    # Directly transcribe an existing audio file
+async def transcribe_audio(file_path: str) -> dict:
+    """
+    Transcribe audio file and return both the transcription text and detected language.
+    """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Audio file not found: {file_path}")
-    segments, _ = model.transcribe(file_path)
-    return " ".join([segment.text for segment in segments])
+
+    segments, info = model.transcribe(file_path)
+    transcription = " ".join([segment.text for segment in segments])
+    detected_lang = info.language  # ISO language code like 'en', 'ar', 'fr', etc.
+
+    return {"text": transcription, "language": detected_lang}
