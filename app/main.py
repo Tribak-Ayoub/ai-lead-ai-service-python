@@ -18,14 +18,15 @@
 # app.include_router(tts.router, prefix="/tts")
 # app.include_router(intent.router, tags=["Intent Detection"])
 
+from dotenv import load_dotenv
+load_dotenv()
 
-# app/main.py
 from fastapi import FastAPI
-from app.routers import stt
+from app.routers import ws_stream, tts, intent, one_shot
 
 app = FastAPI()
 
-app.include_router(stt.router, prefix="/api")
-
-# app.include_router(intent.router, prefix="/api/intent")
-
+app.include_router(ws_stream.router)
+app.include_router(tts.router, prefix="/api")
+app.include_router(intent.router, prefix="/api")
+app.include_router(one_shot.router, prefix="/api")

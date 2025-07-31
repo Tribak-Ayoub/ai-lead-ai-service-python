@@ -22,3 +22,8 @@ httpx==0.24.1
 pytest==7.4.2
 
 ari-py
+
+websockets
+numpy
+soundfile
+aiohttp

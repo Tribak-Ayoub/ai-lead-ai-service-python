@@ -1,46 +1,31 @@
-# routers/stt.py
+# from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+# from starlette.websockets import WebSocketState
+# from app.services.whisper_buffer_service import AudioBuffer
+# import asyncio
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.services.whisper_service import transcribe_audio_stream
-from app.services.intent_service import detect_intent  # 👈 new
+# router = APIRouter()
 
-router = APIRouter()
+# # Global buffer (or you can make it per-connection if needed)
+# audio_buffer = AudioBuffer(sample_rate=16000, interval=1)
 
-@router.websocket("/api/whisper/ws/stream")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print("connection open")
+# # Callback when transcription finishes
+# def on_transcription(text: str):
+#     print(">> Final Transcribed:", text)
 
-    audio_chunks = []
+# @router.websocket("/ws/audio")
+# async def audio_stream_ws(websocket: WebSocket):
+#     await websocket.accept()
+#     print("[*] WebSocket accepted")
 
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            if data == b"__end__":
-                break
-            audio_chunks.append(data)
+#     # Start the buffer with the callback if not running already
+#     if not audio_buffer.running:
+#         audio_buffer.start(callback=on_transcription)
 
-    except WebSocketDisconnect:
-        print("WebSocket disconnected")
+#     try:
+#         while websocket.application_state == WebSocketState.CONNECTED:
+#             chunk = await websocket.receive_bytes()
+#             audio_buffer.add_chunk(chunk)
 
-    finally:
-        print("Transcribing", len(b"".join(audio_chunks)), "bytes of audio...")
-        text = transcribe_audio_stream(audio_chunks)
-
-        if text:
-            print("Transcription result:", text)
-            try:
-                intent_result = detect_intent(text)  # 👈 call intent service
-            except Exception as e:
-                intent_result = {"error": str(e)}
-
-            await websocket.send_json({
-                "text": text,
-                "intent": intent_result
-            })
-        else:
-            print("Final transcription failed")
-            await websocket.send_json({"error": "Transcription failed"})
-
-        await websocket.close()
-        print("connection closed")
+#     except WebSocketDisconnect:
+#         print("[*] WebSocket disconnected")
+#         audio_buffer.stop()

@@ -1,27 +1,21 @@
+# test_audio_ws_client.py
 import asyncio
 import websockets
+import wave
 
-AUDIO_FILE = "test_audio.wav"
+async def send_wav_as_stream(wav_file):
+    uri = "ws://localhost:8000/ws/audio"
 
-async def send_audio():
-    uri = "ws://localhost:8000/api/whisper/ws/stream"
-    async with websockets.connect(uri) as websocket:
-        print("Connected to WebSocket")
+    async with websockets.connect(uri) as ws:
+        wf = wave.open(wav_file, 'rb')
+        chunk_size = 320  # for 8000Hz, 16-bit, mono, ~20ms
+        chunk = wf.readframes(chunk_size)
 
-        # Read the WAV file and send it in chunks
-        with open(AUDIO_FILE, "rb") as f:
-            while chunk := f.read(1024):
-                await websocket.send(chunk)
-                await asyncio.sleep(0.01)  # simulate real-time audio
+        while chunk:
+            await ws.send(chunk)
+            await asyncio.sleep(0.02)  # simulate real-time
+            chunk = wf.readframes(chunk_size)
 
-        print("Finished sending audio. Waiting for result...")
+        print("Done sending audio")
 
-        try:
-            response = await asyncio.wait_for(websocket.recv(), timeout=10.0)  # was 3.0
-            print("Received:", response)
-        except asyncio.TimeoutError:
-            print("❌ Timeout waiting for transcription")
-        except websockets.exceptions.ConnectionClosedOK:
-            print("WebSocket connection closed.")
-
-asyncio.run(send_audio())
+asyncio.run(send_wav_as_stream("test.wav"))
