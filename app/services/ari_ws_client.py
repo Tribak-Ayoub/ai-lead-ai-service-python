@@ -26,11 +26,18 @@ os.makedirs(TEMP_COPY_DIR, exist_ok=True)
 os.makedirs(ASTERISK_SOUNDS_CUSTOM, exist_ok=True)
 
 
+# Track active channels
+active_channels = set()
+
 # === Helpers ===
 async def play_sound(session, channel_id, media: str):
     """
     media should be like "hello-world" (built-in) or "custom/tts-<id>" (without .wav).
     """
+    if channel_id not in active_channels:
+        print(f"[Asterisk] Skipping playback for inactive channel {channel_id}")
+        return
+        
     url = f"{ARI_REST_URL}/channels/{channel_id}/play"
     payload = {"media": f"sound:{media}"}
     async with session.post(url, headers=auth_header, json=payload) as resp:
@@ -42,6 +49,10 @@ async def play_sound(session, channel_id, media: str):
 
 
 async def record_channel(session, channel_id):
+    if channel_id not in active_channels:
+        print(f"[Asterisk] Skipping recording for inactive channel {channel_id}")
+        return
+        
     url = f"{ARI_REST_URL}/channels/{channel_id}/record"
     payload = {
         "name": f"recording-{channel_id}",
@@ -53,7 +64,24 @@ async def record_channel(session, channel_id):
     }
     async with session.post(url, headers=auth_header, json=payload) as resp:
         print(f"[Asterisk] Start recording status: {resp.status}")
-        return await resp.json()
+        if resp.status == 404:
+            print(f"[Asterisk] Channel {channel_id} no longer exists, removing from active channels")
+            active_channels.discard(channel_id)
+        return await resp.json() if resp.status < 300 else None
+
+
+async def hangup_channel(session, channel_id):
+    """Hang up the specified channel"""
+    if channel_id not in active_channels:
+        print(f"[Asterisk] Channel {channel_id} not in active channels, skipping hangup")
+        return
+        
+    url = f"{ARI_REST_URL}/channels/{channel_id}"
+    async with session.delete(url, headers=auth_header) as resp:
+        print(f"[Asterisk] Hangup request for channel {channel_id} returned status: {resp.status}")
+        if resp.status < 300:
+            active_channels.discard(channel_id)
+        return resp.status
 
 
 async def handle_recording_finished(session, recording_name, channel_id):
@@ -119,6 +147,21 @@ async def handle_recording_finished(session, recording_name, channel_id):
         # Transcribe
         print(f"[Whisper] Transcribing {tmp_rec}")
         try:
+            # Check if file has actual audio content
+            file_size = os.path.getsize(tmp_rec)
+            print(f"[Whisper] Audio file size: {file_size} bytes, length: {len(data)} samples")
+            
+            # Check for silence (very low amplitude)
+            max_amplitude = abs(data).max() if len(data) > 0 else 0
+            print(f"[Whisper] Max amplitude: {max_amplitude}")
+            
+            if file_size < 1000 or max_amplitude < 0.01:
+                print(f"[Whisper] Audio appears to be silent or too small, skipping transcription")
+                if os.path.exists(tmp_rec):
+                    os.remove(tmp_rec)
+                await record_channel(session, channel_id)
+                return
+            
             result = await whisper_service.transcribe_file(tmp_rec)
             print(f"[DEBUG] Transcription completed: {result}")
         except Exception as e:
@@ -156,6 +199,7 @@ async def handle_recording_finished(session, recording_name, channel_id):
                 return
                 
             response_text = qualification.get("reply_text", "I didn't understand that. Could you repeat?")
+            print(f"[Conversation] Response will be: {response_text}")
         except Exception as e:
             print(f"[ERROR] Qualification failed: {e}")
             import traceback
@@ -207,10 +251,16 @@ async def handle_recording_finished(session, recording_name, channel_id):
             print(f"[DEBUG] Playing back TTS '{sound_ref}' on channel {channel_id}")
             await play_sound(session, channel_id, sound_ref)
             
+            # Wait a moment for TTS to start playing
+            await asyncio.sleep(1)
+            
         except Exception as e:
             print(f"[ERROR] TTS file handling failed: {e}")
             import traceback
             traceback.print_exc()
+        
+        # Wait a bit before starting next recording to avoid cutting off TTS
+        await asyncio.sleep(2)
         
         # CRITICAL: Start a new recording to continue the conversation
         print(f"[DEBUG] Starting new recording cycle for channel {channel_id}")
@@ -242,9 +292,22 @@ async def main():
                     if event_type == "StasisStart":
                         channel_id = data["channel"]["id"]
                         print(f"[Call] Started on channel {channel_id}")
+                        active_channels.add(channel_id)
                         await play_sound(session, channel_id, "hello-world")
                         await play_sound(session, channel_id, "beep")
                         await record_channel(session, channel_id)
+
+                    elif event_type == "StasisEnd":
+                        channel_id = data.get("channel", {}).get("id")
+                        if channel_id:
+                            print(f"[Call] Ended on channel {channel_id}")
+                            active_channels.discard(channel_id)
+                        
+                    elif event_type == "ChannelDestroyed":
+                        channel_id = data.get("channel", {}).get("id")
+                        if channel_id:
+                            print(f"[Call] Channel destroyed: {channel_id}")
+                            active_channels.discard(channel_id)
 
                     elif event_type == "RecordingFinished":
                         try:
