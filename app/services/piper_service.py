@@ -5,6 +5,7 @@ import soundfile as sf
 import resampy
 from pathlib import Path
 from app.core.config import settings
+import shutil
 
 VOICE_MODELS = {
     "en": {
@@ -23,17 +24,37 @@ VOICE_MODELS = {
 
 PIPER_BIN = Path(settings.piper_binary)
 
-def synthesize_with_piper(text: str, lang: str = None, sample_rate: int = 8000) -> str:
+
+def convert_to_mulaw_with_ffmpeg(wav_path: str) -> str:
     """
-    Synthesize text to speech with Piper TTS.
-    
+    Use ffmpeg to convert WAV to 8000Hz mu-law (.ulaw) for Asterisk.
+    """
+    ulaw_path = wav_path.replace(".wav", ".ulaw")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", wav_path,
+        "-ar", "8000",
+        "-ac", "1",
+        "-f", "mulaw",
+        ulaw_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return ulaw_path
+
+
+def synthesize_with_piper(text: str, lang: str = None, sample_rate: int = 8000, prefer_ulaw: bool = True) -> str:
+    """
+    Synthesize text to speech with Piper TTS, optionally convert to mu-law for Asterisk playback.
+
     Args:
         text: Text to synthesize
         lang: Language code (en, ar, fr)
         sample_rate: Target sample rate (default 8000 for Asterisk compatibility)
-    
+        prefer_ulaw: Try to output .ulaw if possible to reduce live transcoding.
+
     Returns:
-        Path to the generated WAV file
+        Path to generated audio file (either .ulaw or .wav).
     """
     if lang is None or lang not in VOICE_MODELS:
         lang = "en"
@@ -48,11 +69,10 @@ def synthesize_with_piper(text: str, lang: str = None, sample_rate: int = 8000) 
     if not config_path.exists():
         raise FileNotFoundError(f"Piper config not found: {config_path}")
 
-    # Create temporary file for Piper output (at original sample rate)
+    # Prepare temporary files
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_piper:
         piper_output_path = tmp_piper.name
 
-    # Create final output file (at target sample rate)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_final:
         final_output_path = tmp_final.name
 
@@ -78,27 +98,39 @@ def synthesize_with_piper(text: str, lang: str = None, sample_rate: int = 8000) 
         if not os.path.exists(piper_output_path) or os.path.getsize(piper_output_path) < 1000:
             raise RuntimeError("Piper produced no or too small output file")
 
-        # Read the Piper output and resample if needed
+        # Read and resample if needed
         data, sr = sf.read(piper_output_path)
         print(f"[Piper] Generated audio at {sr} Hz, target: {sample_rate} Hz")
-        
+
         if sr != sample_rate:
             print(f"[Piper] Resampling from {sr} to {sample_rate} Hz")
-            # Handle mono/stereo
             if len(data.shape) == 1:
                 data_resampled = resampy.resample(data, sr, sample_rate)
             else:
                 data_resampled = resampy.resample(data.T, sr, sample_rate).T
         else:
             data_resampled = data
-        
-        # Write final file at target sample rate
+
         sf.write(final_output_path, data_resampled, sample_rate, format='WAV', subtype='PCM_16')
-        
-        # Clean up temporary Piper output
-        os.remove(piper_output_path)
-        
         print(f"[Piper] Final audio saved at {sample_rate} Hz: {final_output_path}")
+
+        # Clean up intermediate file
+        if os.path.exists(piper_output_path):
+            os.remove(piper_output_path)
+
+        # Try converting to mu-law if desired
+        if prefer_ulaw:
+            try:
+                if shutil.which("ffmpeg"):
+                    ulaw_path = convert_to_mulaw_with_ffmpeg(final_output_path)
+                    print(f"[Piper] Converted to mu-law via ffmpeg: {ulaw_path}")
+                    os.remove(final_output_path)
+                    return ulaw_path
+                else:
+                    print("[Piper] ffmpeg not found; skipping mu-law conversion")
+            except Exception as e:
+                print(f"[Piper] mu-law conversion via ffmpeg failed, falling back to WAV: {e}")
+
         return final_output_path
 
     except Exception as e:
@@ -109,21 +141,15 @@ def synthesize_with_piper(text: str, lang: str = None, sample_rate: int = 8000) 
             os.remove(final_output_path)
         raise e
 
+
 def synthesize_bytes(text: str, lang: str = None, sample_rate: int = 8000) -> bytes:
     """
     Synthesize text to speech and return as bytes.
-    
-    Args:
-        text: Text to synthesize
-        lang: Language code
-        sample_rate: Target sample rate (default 8000 for Asterisk)
-    
-    Returns:
-        WAV file bytes
     """
-    wav_path = synthesize_with_piper(text, lang=lang, sample_rate=sample_rate)
+    audio_path = synthesize_with_piper(text, lang=lang, sample_rate=sample_rate)
     try:
-        with open(wav_path, "rb") as f:
+        with open(audio_path, "rb") as f:
             return f.read()
     finally:
-        os.remove(wav_path)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)

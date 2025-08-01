@@ -1,173 +1,242 @@
-# import os
-# import json
-# import re
-# from fastapi import HTTPException
-# import google.genai as genai
+import asyncio
+import json
+import re
+import logging
+from typing import Dict, Any
 
-# API_KEY = os.getenv("GOOGLE_API_KEY")
-# if not API_KEY:
-#     raise RuntimeError("GOOGLE_API_KEY not set in environment or .env file")
+import aiohttp
 
-# client = genai.Client(api_key=API_KEY)
-# MODEL_NAME = "gemini-2.0-flash-001"
+from app.core.config import settings
 
-# # -------------------------
-# # ✅ Quick rule-based check
-# # -------------------------
-# def quick_intent_check(text: str) -> dict | None:
-#     lower = text.lower()
-#     if re.search(r"\b(hi|hello|hey|salam|bonjour|salut)\b", lower):
-#         return {"intent": "greeting", "confidence": 1.0}
-#     if len(lower.strip()) < 3 or re.search(r"\b(hmm+|uh+|um+)\b|\.\.\.", lower):
-#         return {"intent": "unclear", "confidence": 0.9}
-#     return None
+# -------------------------
+# Quick rule-based checks
+# -------------------------
+def quick_intent_check(text: str) -> Dict[str, Any] | None:
+    lower = text.lower().strip()
+    if len(lower) < 2 or re.search(r"\b(hmm+|uh+|um+)\b|\.\.\.", lower):
+        return {
+            "intent": "unclear",
+            "confidence": 0.6,
+            "response_text": "I didn't quite catch that. Could you clarify?",
+            "next_action": "clarify",
+            "end": False
+        }
+    if re.search(r"\b(hi|hello|hey|salam|bonjour|good morning|good afternoon)\b", lower):
+        return {
+            "intent": "greeting",
+            "confidence": 0.7,  # lowered so Gemini can override if there's more content
+            "response_text": "Hi! Thanks for taking the call. Are you interested in learning more about our solution?",
+            "next_action": "ask_interest",
+            "end": False
+        }
+    if re.search(r"\b(not interested|don't want|don't need|no thanks|maybe later|not now)\b", lower):
+        return {
+            "intent": "not_interested",
+            "confidence": 0.95,
+            "response_text": "I understand. Thank you for your time. Have a great day!",
+            "next_action": "close_politely",
+            "end": True
+        }
+    if re.search(r"\b(demo|demonstration|show me|see it|preview)\b", lower):
+        return {
+            "intent": "wants_demo",
+            "confidence": 0.9,
+            "response_text": "Excellent! I'd be happy to show you a demo. When would be a good time for you?",
+            "next_action": "schedule_demo",
+            "end": False
+        }
+    if re.search(r"\b(\$?\d+(\.\d+)?\s*(k|thousand|million)?|\bbudget\b|\bafford\b)\b", lower):
+        return {
+            "intent": "has_budget",
+            "confidence": 0.8,
+            "response_text": "Great! Based on your budget, I think our solution would be a perfect fit. Would you like to see a quick demo?",
+            "next_action": "offer_demo",
+            "end": False
+        }
+    return None
 
-# # -----------------------------
-# # 🤖 Gemini intent classifier
-# # -----------------------------
-# async def detect_intent(text: str) -> dict:
-#     # First try manual pattern matching
-#     fallback = quick_intent_check(text)
-#     if fallback:
-#         return fallback
 
-#     prompt = (
-#         "You are an AI assistant helping to qualify phone leads. "
-#         "Based on the given transcription, classify the caller's intent into one of the following categories: "
-#         "interested, not interested, needs follow-up, invalid number, or other.\n"
-#         "Respond **only** with a valid JSON object in this format:\n"
-#         "{\"intent\": \"interested\", \"confidence\": 0.93}\n"
-#         "If you're unsure, still provide your best guess with low confidence.\n\n"
-#         f"Transcription: \"{text}\""
-#     )
-
-#     try:
-#         from asyncio import to_thread
-#         response = await to_thread(
-#             lambda: client.models.generate_content(
-#                 model=MODEL_NAME,
-#                 contents=[{"text": prompt}],
-#             )
-#         )
-#     except Exception as e:
-#         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
-
-#     raw = response.text.strip()
-#     raw = re.sub(r"^```json\s*|\s*```$", "", raw)
-
-#     try:
-#         intent_json = json.loads(raw)
-#     except json.JSONDecodeError:
-#         raise HTTPException(status_code=500, detail=f"Invalid JSON from Gemini: {raw}")
-
-#     if not isinstance(intent_json, dict) or "intent" not in intent_json:
-#         raise HTTPException(status_code=500, detail="Missing 'intent' in Gemini response")
-
-#     return {
-#         "intent": intent_json.get("intent", "unknown"),
-#         "confidence": round(float(intent_json.get("confidence", 0.5)), 2)
-#     }
-
-async def qualify_transcript(session_id: str, transcript: str):
+# -------------------------
+# Gemini integration
+# -------------------------
+async def call_gemini_intent_classifier(transcript: str) -> Dict[str, Any]:
     """
-    Improved conversation flow with state tracking
+    Call Gemini Generative Language API to classify intent and get reply.
     """
-    lower = transcript.lower()
-    score = 0
-    intent = "unknown"
-    entities = {"budget": None, "timeline": None}
-    
-    print(f"[INTENT] Processing transcript: '{transcript}'")
-    print(f"[INTENT] Lowercased: '{lower}'")
-    
-    # Check for budget-related responses first
-    budget_keywords = ["thousand", "k", "dollar", "budget", "hundred", "million", "afford"]
-    budget_numbers = ["1", "2", "3", "4", "5", "10", "20", "50", "100", "500", "1000"]
-    
-    has_budget_mention = any(keyword in lower for keyword in budget_keywords)
-    has_numbers = any(num in lower for num in budget_numbers)
-    
-    if has_budget_mention or has_numbers:
-        intent = "has_budget"
-        score += 2
-        entities["budget"] = "mentioned"
-        print(f"[INTENT] Detected budget mention")
-    
-    # Check for positive responses
-    positive_keywords = ["yes", "sure", "ok", "okay", "interested", "want", "need", "like"]
-    if any(keyword in lower for keyword in positive_keywords):
-        if intent == "unknown":
-            intent = "interested"
-        score += 1
-        print(f"[INTENT] Detected positive response")
-    
-    # Check for negative responses (be more specific to avoid false positives)
-    negative_phrases = ["not interested", "don't want", "don't need", "maybe later", "not now", "no thanks", "not for me"]
-    is_negative = False
-    
-    # Check for explicit "no" at the beginning or as a standalone response
-    if lower.strip().startswith("no ") or lower.strip() == "no":
-        is_negative = True
-    
-    # Check for negative phrases
-    for phrase in negative_phrases:
-        if phrase in lower:
-            is_negative = True
-            break
-    
-    if is_negative:
-        intent = "not_interested"
-        score -= 2
-        print(f"[INTENT] Detected negative response")
-    
-    # Check for demo requests
-    demo_keywords = ["demo", "demonstration", "show me", "see it", "preview"]
-    if any(keyword in lower for keyword in demo_keywords):
-        intent = "wants_demo"
-        score += 2
-        print(f"[INTENT] Detected demo interest")
-    
-    # Check for timeline mentions
-    timeline_keywords = ["soon", "asap", "urgent", "this week", "this month", "next week", "next month"]
-    if any(keyword in lower for keyword in timeline_keywords):
-        entities["timeline"] = "mentioned"
-        score += 1
-        print(f"[INTENT] Detected timeline mention")
-    
-    # Determine next action and response based on current state
-    print(f"[INTENT] Current intent: {intent}, score: {score}")
-    
-    if intent == "not_interested":
-        next_action = "close_politely"
-        reply_text = "I understand. Thank you for your time. Have a great day!"
-        end = True
-    elif intent == "has_budget":
-        next_action = "offer_demo"
-        reply_text = "Great! Based on your budget, I think our solution would be a perfect fit. Would you like to see a quick demo?"
-        end = False
-    elif intent == "wants_demo":
-        next_action = "schedule_demo"
-        reply_text = "Excellent! I'd be happy to show you a demo. When would be a good time for you?"
-        end = False
-    elif intent == "interested":
-        # If they're interested but haven't mentioned budget, ask about it
-        next_action = "ask_budget"
-        reply_text = "That's great to hear! To help me recommend the best solution, could you share what budget range you're working with?"
-        end = False
-    else:
-        # Handle unclear or unknown responses
-        next_action = "clarify"
-        reply_text = "I want to make sure I understand your needs. Are you interested in learning more about our solution?"
-        end = False
-    
-    result = {
+    # Build URL here to ensure API key is injected cleanly
+    api_key = settings.google_api_key
+    model = settings.gemini_model
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateMessage?key={api_key}"
+
+    prompt = f"""
+You are a lead qualification assistant on a sales call. The caller said: "{transcript}"
+
+Classify their intent into one of these categories:
+- interested
+- not_interested
+- wants_demo
+- has_budget
+- unclear
+
+Also infer if there's a timeline or budget signal.
+
+Then produce a next action and a concise conversational reply that moves the call forward.
+
+Respond with a JSON object exactly in this format:
+{{
+  "intent": "<one of the above>",
+  "confidence": 0.0,
+  "entities": {{"budget": "<if present or null>", "timeline": "<if present or null>"}},
+  "next_action": "<ask_budget|offer_demo|schedule_demo|close_politely|clarify>",
+  "reply_text": "<what to say to the caller next>",
+  "end": <true|false>
+}}
+If you're unsure, pick the best guess and set confidence low.
+"""
+
+    body = {
+        "messages": [
+            {"role": "user", "content": {"text": prompt}}
+        ],
+        "temperature": 0.3,
+        "max_output_tokens": 300,
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(gemini_url, headers=headers, json=body, timeout=10) as resp:
+                raw = await resp.text()
+                if resp.status != 200:
+                    logging.warning(f"[Gemini] Non-200 response: {resp.status} body: {raw}")
+                    raise RuntimeError(f"Gemini API returned status {resp.status}")
+                data = await resp.json()
+    except Exception as e:
+        logging.error(f"[Gemini] Exception calling API: {e}")
+        return {
+            "intent": "unclear",
+            "confidence": 0.4,
+            "entities": {"budget": None, "timeline": None},
+            "next_action": "clarify",
+            "reply_text": "I want to make sure I understood — could you tell me more about what you're looking for?",
+            "end": False
+        }
+
+    # Extract text output; adapt based on actual response schema
+    raw_text = ""
+    try:
+        if "output" in data and isinstance(data["output"], list):
+            for item in data["output"]:
+                if isinstance(item.get("content"), list):
+                    for c in item["content"]:
+                        if "text" in c:
+                            raw_text += c["text"]
+        elif "candidates" in data and isinstance(data["candidates"], list):
+            cand = data["candidates"][0]
+            if isinstance(cand.get("content"), list):
+                for c in cand["content"]:
+                    if "text" in c:
+                        raw_text += c["text"]
+        else:
+            raw_text = data.get("text", "")
+    except Exception as e:
+        logging.error(f"[Gemini] Failed to parse response shape: {e}; full payload: {data}")
+        raw_text = ""
+
+    raw_text = raw_text.strip()
+    if not raw_text:
+        logging.warning("[Gemini] Empty model response, falling back")
+        return {
+            "intent": "unclear",
+            "confidence": 0.4,
+            "entities": {"budget": None, "timeline": None},
+            "next_action": "clarify",
+            "reply_text": "Could you say that again? I want to understand your needs.",
+            "end": False
+        }
+
+    # Strip markdown fences if any
+    raw_text = re.sub(r"^```json\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
+
+    try:
+        intent_json = json.loads(raw_text)
+    except json.JSONDecodeError:
+        logging.error(f"[Gemini] JSON decode error on '{raw_text}'")
+        return {
+            "intent": "unclear",
+            "confidence": 0.5,
+            "entities": {"budget": None, "timeline": None},
+            "next_action": "clarify",
+            "reply_text": raw_text or "I didn't quite get that; could you clarify?",
+            "end": False
+        }
+
+    intent = intent_json.get("intent", "unknown")
+    confidence = float(intent_json.get("confidence", 0.0))
+    entities = intent_json.get("entities", {}) if isinstance(intent_json.get("entities", {}), dict) else {}
+    next_action = intent_json.get("next_action", "clarify")
+    reply_text = intent_json.get("reply_text", "")
+    end = bool(intent_json.get("end", False))
+
+    return {
         "intent": intent,
-        "entities": entities,
-        "lead_score": score,
+        "confidence": round(confidence, 2),
+        "entities": {
+            "budget": entities.get("budget"),
+            "timeline": entities.get("timeline"),
+        },
         "next_action": next_action,
-        "reply_text": reply_text,
+        "reply_text": reply_text or "Could you tell me more about that?",
         "end": end
     }
-    
-    print(f"[INTENT] Final result: {result}")
+
+
+# -------------------------
+# Top-level qualification
+# -------------------------
+async def qualify_transcript(session_id: str, transcript: str) -> Dict[str, Any]:
+    """
+    Main qualification: quick rules first, then Gemini for richer understanding.
+    """
+    print(f"[INTENT] Received transcript for session {session_id}: '{transcript}'")
+
+    # Try rule-based first
+    quick = quick_intent_check(transcript)
+    if quick and quick.get("confidence", 0) >= 0.9:
+        result = {
+            "intent": quick["intent"],
+            "entities": {"budget": None, "timeline": None},
+            "lead_score": 0,
+            "next_action": quick["next_action"],
+            "reply_text": quick["response_text"],
+            "end": quick.get("end", False)
+        }
+        print(f"[INTENT] Quick rule result: {result}")
+        return result
+
+    # Otherwise call Gemini
+    gemini_result = await call_gemini_intent_classifier(transcript)
+
+    # Heuristic lead score
+    lead_score = 0
+    if gemini_result["intent"] in ("interested", "has_budget", "wants_demo"):
+        lead_score += 1
+    if gemini_result["intent"] == "has_budget":
+        lead_score += 1
+    if gemini_result["intent"] == "not_interested":
+        lead_score -= 1
+
+    result = {
+        "intent": gemini_result["intent"],
+        "entities": gemini_result["entities"],
+        "lead_score": lead_score,
+        "next_action": gemini_result["next_action"],
+        "reply_text": gemini_result["reply_text"],
+        "end": gemini_result["end"]
+    }
+
+    print(f"[INTENT] Gemini-enhanced result: {result}")
     return result
